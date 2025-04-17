@@ -5,6 +5,7 @@ module Data.Codec.Argonaut.Sum
   , class GCases
   , class GFields
   , class GFlatCases
+  , class GTagsMap
   , defaultEncoding
   , defaultFlatEncoding
   , enumSum
@@ -14,10 +15,13 @@ module Data.Codec.Argonaut.Sum
   , gFieldsEncode
   , gFlatCasesDecode
   , gFlatCasesEncode
+  , gTagsMap
   , sum
+  , sum'
   , sumFlat
   , sumFlatWith
   , sumWith
+  , sumWith'
   , taggedSum
   ) where
 
@@ -35,7 +39,7 @@ import Data.Codec.Argonaut as CA
 import Data.Codec.Argonaut.Record as CAR
 import Data.Either (Either(..), note)
 import Data.Generic.Rep (class Generic, Argument(..), Constructor(..), NoArguments(..), Product(..), Sum(..), from, to)
-import Data.Maybe (Maybe(..), maybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Profunctor (dimap)
 import Data.Symbol (class IsSymbol, reflectSymbol)
 import Data.Tuple (Tuple(..))
@@ -149,6 +153,44 @@ finalizeError name err =
       JErr jerr → jerr
 
 data Err = UnmatchedCase | JErr JsonDecodeError
+
+sum' ∷ ∀ r' r rep a. GTagsMap r' rep ⇒ GCases r rep ⇒ Generic a rep ⇒ String → Record r' → Record r → JsonCodec a
+sum' = sumWith' defaultEncoding
+
+sumWith' ∷ ∀ r' r rep a. GTagsMap r' rep ⇒ GCases r rep ⇒ Generic a rep ⇒ Encoding → String → Record r' → Record r → JsonCodec a
+sumWith' encoding name tags r =
+  sumWith encoding' name r
+  where
+  mapObj = gTagsMap (Proxy @rep) tags
+  useTagsMap s = fromMaybe s (Obj.lookup s mapObj)
+  encoding' = case encoding of
+    EncodeNested enc →
+      EncodeNested $ enc { mapTag = useTagsMap >>> enc.mapTag }
+
+    EncodeTagged enc →
+      EncodeTagged $ enc { mapTag = useTagsMap >>> enc.mapTag }
+
+--------------------------------------------------------------------------------
+
+class GTagsMap ∷ ∀ k. Row Type → k → Constraint
+class GTagsMap r rep where
+  gTagsMap ∷ Proxy rep → Record r → Object String
+
+instance gTagsMapConstructor ∷
+  ( Row.Cons name String () r
+  , IsSymbol name
+  ) ⇒
+  GTagsMap r (Constructor name a) where
+  gTagsMap _ = unsafeCoerce
+
+instance gTagsMapSum ∷
+  ( GTagsMap r1 rhs
+  , Row.Cons name String r1 r
+  , Row.Lacks name r1
+  , IsSymbol name
+  ) ⇒
+  GTagsMap r (Sum (Constructor name lhs) rhs) where
+  gTagsMap _ = unsafeCoerce
 
 --------------------------------------------------------------------------------
 
@@ -487,7 +529,6 @@ instance gFlatCasesConstructorNoArg ∷
 
     pure (Constructor NoArguments)
 
-
 instance gFlatCasesConstructorSingleArg ∷
   ( Row.Cons name (JPropCodec (Record rf)) () rc
   , Row.Lacks tag rf
@@ -508,19 +549,17 @@ instance gFlatCasesConstructorSingleArg ∷
     in
       CA.encode codecWithTag rcWithTag
 
-
   gFlatCasesDecode ∷ FlatEncoding tag → Record rc → Json → Either Err (Constructor name (Argument (Record rf)))
   gFlatCasesDecode { mapTag } rc json = do
     let
       nameRaw = reflectSymbol (Proxy @name) ∷ String
       name = mapTag nameRaw ∷ String
       tag = reflectSymbol (Proxy @tag) ∷ String
-    
 
     obj ← lmap JErr $ CA.decode jobject json
 
     checkTag tag obj name
-      
+
     let
       propCodec = Record.get (Proxy @name) rc ∷ JPropCodec (Record rf)
       codec = CA.object ("case " <> name) propCodec ∷ JsonCodec (Record rf)
@@ -550,7 +589,7 @@ instance gFlatCasesSum ∷
         Inl lhs → gFlatCasesEncode @tag encoding r1 lhs
         Inr rhs → gFlatCasesEncode @tag encoding r2 rhs
 
-  gFlatCasesDecode ∷ FlatEncoding tag -> Record r → Json → Either Err (Sum (Constructor name lhs) rhs)
+  gFlatCasesDecode ∷ FlatEncoding tag → Record r → Json → Either Err (Sum (Constructor name lhs) rhs)
   gFlatCasesDecode encoding r tagged = do
     let
       codec = Record.get (Proxy @name) r ∷ codec
@@ -570,4 +609,3 @@ instance gFlatCasesSum ∷
 -- | and the value is left untouched.
 unsafeDelete ∷ ∀ r1 r2 l a. IsSymbol l ⇒ Row.Lacks l r1 ⇒ Row.Cons l a r1 r2 ⇒ Proxy l → Record r2 → Record r1
 unsafeDelete _ r = unsafeCoerce r
-
