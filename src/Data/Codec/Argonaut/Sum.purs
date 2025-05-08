@@ -17,11 +17,13 @@ module Data.Codec.Argonaut.Sum
   , gFlatCasesEncode
   , gTagsMap
   , sum
-  , sum'
   , sumFlat
-  , sumFlatWith
   , sumWith
+  , sumFlatWith
+  , sum'
+  , sumFlat'
   , sumWith'
+  , sumFlatWith'
   , taggedSum
   ) where
 
@@ -177,20 +179,29 @@ class GTagsMap r rep where
   gTagsMap ∷ Proxy rep → Record r → Object String
 
 instance gTagsMapConstructor ∷
-  ( Row.Cons name String () r
+  ( Row.Cons name (String → String) () r
   , IsSymbol name
   ) ⇒
   GTagsMap r (Constructor name a) where
-  gTagsMap _ = unsafeCoerce
+  gTagsMap _ r =
+    Obj.singleton tag mapped
+    where
+    tag = reflectSymbol @name Proxy ∷ String
+    mapped = (Record.get (Proxy @name) r) tag
 
 instance gTagsMapSum ∷
   ( GTagsMap r1 rhs
-  , Row.Cons name String r1 r
+  , Row.Cons name (String → String) r1 r
   , Row.Lacks name r1
   , IsSymbol name
   ) ⇒
   GTagsMap r (Sum (Constructor name lhs) rhs) where
-  gTagsMap _ = unsafeCoerce
+  gTagsMap _ r =
+    Obj.insert tag mapped
+      (gTagsMap (Proxy @rhs) (Record.delete (Proxy @name) r))
+    where
+    tag = reflectSymbol @name Proxy ∷ String
+    mapped = (Record.get (Proxy @name) r) tag
 
 --------------------------------------------------------------------------------
 
@@ -489,6 +500,17 @@ sumFlatWith encoding name r =
   where
   dec = gFlatCasesDecode @tag encoding r >>> (lmap $ finalizeError name)
   enc = gFlatCasesEncode @tag encoding r
+
+sumFlat' ∷ ∀ r' r rep a. GFlatCases "tag" r rep ⇒ GTagsMap r' rep ⇒ Generic a rep ⇒ String → Record r' → Record r → JsonCodec a
+sumFlat' = sumFlatWith' defaultFlatEncoding
+
+sumFlatWith' ∷ ∀ @tag r' r rep a. IsSymbol tag ⇒ GTagsMap r' rep ⇒ GFlatCases tag r rep ⇒ Generic a rep ⇒ FlatEncoding tag → String → Record r' → Record r → JsonCodec a
+sumFlatWith' encoding name tags r =
+  sumFlatWith encoding' name r
+  where
+  mapObj = gTagsMap (Proxy @rep) tags
+  useMap s = fromMaybe s (Obj.lookup s mapObj)
+  encoding' = encoding { mapTag = useMap >>> encoding.mapTag }
 
 class GFlatCases ∷ Symbol → Row Type → Type → Constraint
 class
